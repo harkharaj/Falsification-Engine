@@ -1,0 +1,14 @@
+langchain-core
+langchain-openai
+langchain-text-splitters
+langchain-chroma
+langgraph
+chromadb
+openai
+pydantic
+python-dotenv
+ddgs
+requests
+beautifulsoup4
+pypdf
+streamlit

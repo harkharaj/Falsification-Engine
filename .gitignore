@@ -1,0 +1,10 @@
+# Paths here are relative to this folder, and add to the root .gitignore so the
+# project still works if you push only this directory as its own repo.
+.env
+.streamlit/secrets.toml
+secrets.toml
+!secrets.toml.example
+__pycache__/
+reports/*
+!reports/.gitkeep
+evals/results-*.json
