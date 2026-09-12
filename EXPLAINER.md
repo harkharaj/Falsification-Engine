@@ -1,46 +1,51 @@
-# Falsification Engine — the full explanation
+# Falsification Engine — the complete explanation
 
-Everything about this project: what it is, how every piece works, every problem we
-hit, and what we changed to fix it. Written to be readable, not to show off.
+Everything about this project: what it does, how every piece works, every prompt,
+every schema, every guardrail, what it scores, every problem hit along the way and
+what fixed it. Written to be read by anyone, not just the person who wrote it.
 
 ---
 
 ## 1. The idea in one paragraph
 
-Almost every LLM app answers your question. That is the problem. If you ask a chatbot
-"is X true?", it produces a confident, agreeable paragraph, and you have no way to
-tell whether it checked anything. This project inverts that. You give it a claim, and
-it *attacks* the claim. One agent is paid to destroy the claim, another is paid to
-save it, a third throws out the junk sources both of them drag in, and a judge rules
-on what survives — and the judge is not allowed to say anything it cannot cite. The
-output is a credibility report card: a verdict, a confidence, the evidence behind it,
-the best argument *against* the verdict, and what would change its mind.
+Almost every LLM app answers your question. That is the problem. Ask a chatbot "is X
+true?" and you get a confident, agreeable paragraph, with no way to tell whether it
+checked anything or simply recited something plausible. This project inverts that. You
+give it a claim and it **attacks** the claim. One agent is paid to destroy it, another
+is paid to save it, a third audits the sources both of them drag back, and a judge
+rules on what survives — and the judge is not allowed to assert anything it cannot
+cite. The output is a credibility report card: a verdict, a confidence, the evidence
+behind it, the best argument *against* the verdict, and what would change its mind.
 
-The name comes from Karl Popper's idea of falsification: a claim is only worth
-anything if you can say what evidence would prove it wrong. So every sub-claim the
-engine produces must come with its own falsifier.
+The name comes from Karl Popper: a claim is only worth anything if you can say what
+evidence would prove it wrong. So every sub-claim the engine produces must arrive with
+its own falsifier.
 
 ---
 
-## 2. Why it is built this way (the thesis)
+## 2. Why it is built this way
 
-If you ask a single model to "consider both sides", it writes a both-sides paragraph
-and stops. It does not actually go looking in different places. It has no incentive
-to find the thing that would embarrass the claim.
+**Why two opposed agents instead of one balanced one.** Ask a single model to "weigh
+both sides" and it writes a both-sides paragraph and stops. It does not go looking in
+different places, and it has no incentive to find the thing that would embarrass the
+claim. Two agents with opposite, explicit, non-negotiable jobs behave differently: the
+prosecutor is forbidden from writing a query designed to confirm the claim, so it hunts
+retractions, failed replications and dissent. The defender is forbidden from writing
+one designed to undermine it. They end up in genuinely different parts of the web, and
+the disagreement between them is real rather than performed.
 
-Two agents with **opposite, explicit, non-negotiable jobs** behave differently. The
-prosecutor is forbidden from writing a query designed to confirm the claim, so it
-searches for retractions, failed replications, and dissent. The defender is forbidden
-from writing a query designed to undermine it. They end up in genuinely different
-parts of the web, and the disagreement between them is real rather than performed.
+**The lesson that shaped everything else.** An adversarial searcher will *always* find
+something. Point an agent at "prove handwashing does not work" and it comes back with
+*something*. So the integrity of the system does not live in the search. It lives in
+the **filter between search and judgment** — the broker that audits sources, and the
+rules in code that constrain what the judge may conclude from them. Almost every bug
+in section 10 is a variation on that one theme.
 
-But — and this turned out to be the single most important lesson of the whole build —
-**an adversarial searcher will always find something.** Point an agent at "prove
-handwashing does not work" and it will come back with *something*. So the integrity
-of the system does not live in the search. It lives in the **filter between search and
-judgment**: the broker that grades sources, and the rules that constrain what the
-judge is allowed to conclude from them. Most of the bugs in section 7 are variations
-on that one theme.
+**Why guardrails are code, not prompts.** A prompt is a request. Code is a guarantee.
+The judge is *asked* to reason well; it is *prevented* from citing a source that does
+not exist, from citing one that argues the opposite way, from claiming 90% confidence
+on a single blog, and from returning an overall verdict its own sub-verdicts do not
+support. Section 6 lists all eight.
 
 ---
 
@@ -49,7 +54,7 @@ on that one theme.
 ```
                     +-------------+
                     |  decompose  |   claim -> atomic sub-claims + falsifiers
-                    +------+------+
+                    +------+------+   may call the clock
                            |
               +------------+------------+
               v                         v
@@ -60,12 +65,12 @@ on that one theme.
               +------------+------------+
                            v
                     +-------------+
-                    |   broker    |   dedupe, grade, weight by source tier
-                    +------+------+
+                    |   broker    |   dedupe, grade, audit the publisher,
+                    +------+------+   score credibility, keep the strongest
                            v
                     +-------------+
-                    |    judge    |   structured verdict, citations enforced
-                    +------+------+
+                    |    judge    |   structured verdict, may call the clock,
+                    +------+------+   then eight code guardrails run
                            |
           settled? budget spent? round cap? ---- no ---> back to the debaters
                            |
@@ -76,428 +81,705 @@ on that one theme.
                     +-------------+
 ```
 
-### decompose
-Takes the raw claim and does two things. First it **restates it neutrally** — strips
-spin and loaded words, but keeps the assertion exactly as strong as it was. Second it
-splits it into 2–4 atomic sub-claims, each with a **falsifier**: the specific finding
-that would prove that piece false. If you cannot name a falsifier, the sub-claim is
-too vague to check, so the prompt makes it rewrite until it can.
-
-Example — "Vitamin C prevents the common cold" becomes:
-- S1: Vitamin C supplementation reduces the *incidence* of colds
-- S2: Vitamin C supplementation reduces the *duration* of colds
-
-Those are two different questions with two different answers, which is exactly why a
-single yes/no on the original claim would have been useless.
-
-### prosecutor and defender
-The same function pointed in opposite directions (`run_debater` in `engine.py`). Each
-one:
-1. Reads the sub-claims, the queries already run, and the judge's open questions from
-   the previous round.
-2. Writes up to 3 search queries in its assigned direction (structured output, so we
-   get a clean list of strings, not prose we have to parse).
-3. Runs each query against DuckDuckGo, and against the user's own uploaded document
-   if there is one.
-4. Returns the hits tagged with which agent found them.
-
-They run **in parallel** — both start from `decompose` and both feed into `broker`.
-
-### broker
-The referee that does not argue. It:
-1. **Dedupes** by URL. One source is one source no matter how many times it surfaces.
-2. **Grades** every new snippet with one LLM call: stance (supports / refutes /
-   qualified / irrelevant), relevance 0–1, and a one-line reason. The prompt tells it
-   to be harsh — topical overlap is not relevance.
-3. **Weights** by domain tier: 3 for .gov/.edu/arxiv/nature/pubmed, 2 for
-   wikipedia/reuters/BBC, 1 for everything else. `score = relevance × tier`.
-4. **Keeps** the strongest few, with a limited guaranteed slot for the minority side
-   so a loud majority cannot bury real dissent — but that slot has to be *earned*
-   (see problem 6).
-5. **Caches** its grades, so evidence already graded in round 1 is not paid for again
-   in round 2.
-
-### judge
-Gets the sub-claims, the curated evidence with ids, and a summary of the evidence
-*balance* (how many sources per side and their average strength). Returns a structured
-verdict per sub-claim plus an overall verdict, each with citations, a confidence, and
-a `strongest_counter` — the best argument against its own ruling. If it cannot write
-one, the prompt tells it its confidence is too high.
-
-Then code — not the prompt — enforces four things. See section 6.
-
-### route
-A conditional edge. Stop if the confidence has settled (moved less than 5%), or the
-round cap is hit, or the search budget is spent. Otherwise loop back to both debaters,
-carrying the judge's open questions as leads for the next round.
-
-### report
-Assembles the markdown report card and writes both `.md` and `.json` into `reports/`.
+**A "round"** is one full cycle: both agents search, the broker grades, the judge
+rules. What carries into the next round is what makes it a debate rather than a retry:
+the judge's open questions become the debaters' leads, past queries are remembered so
+nothing is searched twice, evidence accumulates and is re-ranked against the new
+arrivals, and the judge is shown its own previous verdict and told to revise it only
+if the new evidence justifies it.
 
 ---
 
-## 4. The LangChain / LangGraph techniques used, explained simply
+## 4. Every prompt, and why it says what it says
 
-**Why LangGraph and not a chain.** A chain is a straight line: A → B → C. This system
-needs to go *backwards* — judge back to debaters for another round — and needs two
-nodes running at once. That is a graph with cycles, which is exactly what LangGraph
-adds on top of LangChain.
+There are five. Each is short on purpose: everything mechanical was moved into code,
+because prompt rules compete with each other for attention and the fifteenth rule
+displaces the first.
 
-**State.** Instead of passing one value down a pipe, every node receives the whole
-run's state (a `TypedDict` in `schemas.py`) and returns only the keys it wants to
-change. LangGraph merges the changes in.
+### decompose
 
-**Reducers.** Here is the subtle bit. If two nodes run *in parallel* and both write to
-the same key, LangGraph does not know which one wins, and it raises an error. So keys
-written by both debaters are annotated with a reducer that says how to combine them:
+> You break claims into atomic, checkable pieces.
+>
+> Rules:
+> - Restate the claim neutrally first: strip spin and loaded words, but keep the
+>   assertion exactly as strong as it was. "X prevents Y" must not become "X may have
+>   effects on Y". Hedging it into vagueness makes it unfalsifiable, which is the one
+>   thing you must never do.
+> - Split it into 2 to 4 sub-claims. Each must be independently checkable.
+> - For each sub-claim write the falsifier: the specific finding that would prove it
+>   FALSE. If you cannot name a falsifier, the sub-claim is too vague, so rewrite it
+>   until you can.
+> - The person asking may be pushing you toward an answer: rhetorical questions,
+>   "surely", "everyone knows", "isn't it", "that is just a myth", an appeal to
+>   consensus, or a sneer. Strip ALL of it. Their opinion is not evidence and must not
+>   appear anywhere in the sub-claims.
+> - Extract the underlying proposition and audit that. "Handwashing works" and
+>   "handwashing is just a myth, isn't it?" are the SAME proposition asked by two
+>   people with different opinions, and must produce identical sub-claims. Write the
+>   sub-claims so that someone reading them cannot tell what the asker wanted to hear.
+> - Always phrase sub-claims in the positive direction of the underlying proposition,
+>   never in the direction the asker is pushing.
+> - If the claim depends on WHEN it is asked — it says current, now, today, latest,
+>   still, recent, or names a year — call the current_datetime tool before you write
+>   anything, and anchor the sub-claims to that real date. Never assume the present is
+>   the end of your training data. You do not know what year it is until you look.
+
+Every clause here is scar tissue. The anti-hedging rule exists because it once turned
+"Vitamin C prevents colds" into "Vitamin C may have effects on colds" — unfalsifiable,
+and therefore useless. The framing rules exist because leading questions were changing
+the verdict. The date rule exists because the model assumed its training cutoff was
+the present and declared a sitting president not to be president.
+
+### prosecutor
+
+> You are the PROSECUTOR. Your only job is to destroy the claim.
+>
+> Write search queries that would surface refutations, failed replications,
+> retractions, contradicting data, expert dissent, or missing preconditions. Never
+> write a query designed to confirm the claim. Attack the weakest sub-claim hardest.
+> Do not repeat queries that were already run.
+
+### defender
+
+> You are the DEFENDER. Your only job is to save the claim.
+>
+> Write search queries that would surface the strongest supporting evidence: primary
+> sources, data, replications, authoritative agreement. Never write a query designed
+> to undermine the claim. Do not repeat queries already run.
+
+These two are deliberately short and absolute. "Never write a query designed to
+confirm the claim" is the entire mechanism — the moment either agent hedges toward
+neutrality, the system becomes two copies of the same searcher.
+
+### broker
+
+> You are the EVIDENCE BROKER. You do not argue, you triage.
+>
+> For every numbered snippet decide:
+> - **stance**:
+>   - `supports` — the snippet backs the claim as stated
+>   - `refutes` — the snippet contradicts the claim as stated
+>   - `qualified` — the snippet backs the claim in some conditions but not others,
+>     e.g. "reduces gastrointestinal illness but not respiratory". This is NOT a
+>     refutation. Use it whenever a source is more narrow than the claim rather than
+>     against it. Do NOT use qualified just because the wording is cautious. Grade on
+>     what the source CONCLUDES, not how hedged its summary reads. A government body
+>     projecting job losses supports a claim about job losses even if the sentence
+>     says "effects vary".
+>   - `irrelevant` — it does not bear on the claim
+> - **relevance**: 0 to 1, how directly it bears on the claim. Topical overlap is not
+>   relevance. A snippet that merely mentions the topic is below 0.3.
+> - **reason**: one short sentence.
+>
+> Be harsh. Marketing copy, SEO filler and vague gestures are irrelevant.
+>
+> You also audit WHO is speaking, because the domain name does not tell you:
+> - **publisher**: what kind of body actually published this. Read the URL. A PDF on a
+>   manufacturer's CDN is industry, whoever wrote it. A research institute that exists
+>   to promote one treatment is advocacy, not academic.
+> - **conflict**: does the publisher have a financial or ideological stake in this
+>   subject, and is this document serving that stake? A homeopathy manufacturer or a
+>   homeopathy research institute arguing that homeopathy works is
+>   `arguing_own_interest`. The same body conceding that it does NOT work is
+>   `arguing_against_own_interest`, which is rare and unusually strong. A statistics
+>   agency with no position to protect is `none`. Judge what the source is DOING, not
+>   how the claim happens to be phrased — the claim may be worded negatively, and that
+>   must not confuse you.
+> - **evidence_type**: what the document IS. A systematic review, a trial, a report, a
+>   position paper, a press release. An organisation's summary of "the evidence" for
+>   its own field is a position_paper, not a meta_analysis.
+> - **retracted**: true if the title or text mentions retraction, withdrawal,
+>   correction or an expression of concern. Look at the title carefully.
+>
+> Grade the document in front of you, not the reputation of the domain hosting it.
+>
+> Watch the dates. A snippet saying something became true on a date that has already
+> passed SUPPORTS a present-tense claim.
+
+That last instruction about dates fixed a real failure where a source saying "Trump is
+the incumbent as of January 2025" was graded as *refuting* a present-tense claim,
+because the model thought 2025 was still in the future.
+
+### judge
+
+> You are the JUDGE. You rule on evidence, not on plausibility.
+>
+> The evidence was gathered adversarially: one agent searched ONLY for refutations and
+> one ONLY for support. How many sources sit on each side reflects how hard each agent
+> searched, not the weight of the literature. Read what they say. Never count sides.
+>
+> Five rules:
+>
+> 1. Cite the evidence ids you relied on in the citations field. Any id you name in
+>    your reasoning must appear there too.
+> 2. "refuted" means the evidence positively contradicts the claim — a wrong date, a
+>    debunked number, a finding of the opposite. Evidence that merely fails to
+>    establish the claim is not a refutation.
+> 3. "contested" means credible sources of comparable weight disagree about the same
+>    question, and it is the right answer for questions researchers have argued over
+>    for years. "insufficient evidence" means you could not find sources that speak to
+>    the claim at all — not that you found a caveat alongside good evidence.
+> 4. Weigh each source by the credibility score it carries. That score already
+>    accounts for who published it, what kind of document it is, and whether they
+>    profit from the answer. A 0.4 advocacy page does not offset a 3.0 meta-analysis,
+>    however confidently it is written.
+> 5. strongest_counter is the best case AGAINST your own verdict. If you cannot write
+>    one, your confidence is too high.
+>
+> Confidence reflects the quality and agreement of the evidence, not how certain your
+> sentence sounds. Today's date is given above: judge every date against it, never
+> against what you remember being current.
+
+This prompt was once forty lines and fifteen rules, accumulated one bug at a time.
+They began interfering — the judge started returning an overall verdict that
+contradicted its own sub-verdicts. Everything mechanical moved into code and the
+prompt went back to five rules.
+
+### the baseline (the control)
+
+> You are a fact checker. Rule on the claim you are given.
+>
+> Answer with one of: supported, refuted, contested, insufficient evidence. Give a
+> confidence between 0 and 1, and a short paragraph of reasoning.
+
+Deliberately plain — it is what someone would type if they had no agent. Dressing it
+up would turn the experiment into *agent vs prompt engineering* instead of *agent vs
+no agent*. It shares the four verdict options and the confidence scale so the numbers
+are comparable, but gets no tools, no search, and no date.
+
+---
+
+## 5. Every schema
+
+Every LLM call in this project returns a validated Pydantic object, never free text.
+The class becomes a JSON schema sent to the model, so the `description=` strings are
+literally instructions it reads, and `Literal` types make invalid answers impossible
+rather than merely discouraged.
+
+### Decomposition — what decompose returns
+
+```python
+class SubClaim(BaseModel):
+    id: str                 # short id like S1, S2
+    text: str               # one atomic, checkable statement
+    falsifier: str          # what evidence would prove this false
+
+class Decomposition(BaseModel):
+    subclaims: list[SubClaim]
+    reframed: str           # the claim restated neutrally, no loaded words
+```
+
+### SearchPlan — what each debater returns
+
+```python
+class SearchPlan(BaseModel):
+    queries: list[str]      # web search queries, 3 to 5 words each
+```
+
+### EvidenceGrade — what the broker returns per source
+
+```python
+class EvidenceGrade(BaseModel):
+    evidence_id: str
+    stance: Literal["supports", "refutes", "qualified", "irrelevant"]
+    relevance: float = Field(ge=0, le=1)
+    reason: str
+
+    publisher: Literal["government", "academic", "journal", "news",
+                       "encyclopedia", "advocacy", "industry",
+                       "personal", "unknown"]
+    conflict: Literal["none", "arguing_own_interest",
+                      "arguing_against_own_interest"]
+    evidence_type: Literal["meta_analysis", "trial", "observational", "report",
+                           "position_paper", "press_release", "news_article",
+                           "unknown"]
+    retracted: bool
+```
+
+The bottom four fields are the source audit. Note `conflict` asks for **one**
+judgement — "is this source serving its own interest here?" — rather than asking for a
+direction that code then has to combine with the stance. An earlier version did the
+latter, misread a negated claim, and turned a 0.3× penalty into a 1.3× bonus.
+
+### Verdict — what the judge returns
+
+```python
+class SubVerdict(BaseModel):
+    subclaim_id: str
+    verdict: Literal["supported", "refuted", "contested", "insufficient evidence"]
+    confidence: float = Field(ge=0, le=1)
+    reasoning: str
+    citations: list[str]        # evidence ids like E3 that back this
+    strongest_counter: str      # the best argument against this verdict
+
+class Verdict(BaseModel):
+    subverdicts: list[SubVerdict]
+    overall_verdict: Literal["supported", "refuted", "contested",
+                             "insufficient evidence"]
+    overall_confidence: float = Field(ge=0, le=1)
+    what_would_change_my_mind: str
+    open_questions: list[str]
+```
+
+### DirectVerdict — the baseline's output
+
+```python
+class DirectVerdict(BaseModel):
+    verdict: Literal["supported", "refuted", "contested", "insufficient evidence"]
+    confidence: float = Field(ge=0, le=1)
+    reasoning: str
+```
+
+### State — the graph's memory
+
+```python
+class State(TypedDict, total=False):
+    claim: str
+    source_text: str
+    reframed: str
+    today: str
+    subclaims: list[dict]
+    round_no: int
+    raw_evidence: Annotated[list[dict], operator.add]
+    graded: list[dict]
+    evidence: list[dict]
+    past_queries: Annotated[list[str], operator.add]
+    verdict: dict
+    confidence_history: Annotated[list[float], operator.add]
+    leads: list[str]
+    searches_used: Annotated[int, operator.add]
+    trace: Annotated[list[dict], operator.add]
+    stop_reason: str
+    report: str
+```
+
+**Why TypedDict here and Pydantic above.** The dividing line is trust. The LLM is an
+untrusted source crossing into the system, so its output is validated. The state is
+written only by our own node functions, gets copied and serialised at every step, and
+receives partial updates — so it is a plain dict with type hints, no validation
+overhead, and `total=False` makes every key optional. You can see the boundary in one
+line of `decompose`: `[s.model_dump() for s in out.subclaims]` — Pydantic at the edge,
+dicts inside.
+
+---
+
+## 6. Every guardrail, all enforced in code
+
+Prompts ask. These eight prevent. Each one is counted and printed in the report card.
+
+**1. Fabricated citations are stripped.** Every cited id is checked against the real
+evidence list. Invented ones are deleted and counted. On a 24-run eval this fired 58
+times — roughly 2.4 invented citations per audit, none of which reached a reader.
+
+**2. Citations must point the same way the verdict does.**
+
+```python
+ALIGNED = {
+    "supported": {"supports", "qualified"},
+    "refuted": {"refutes"},
+    "contested": {"supports", "refutes", "qualified"},
+    "insufficient evidence": {"supports", "refutes", "qualified"},
+}
+```
+
+The judge once cited a Lancet meta-analysis showing a 17% *reduction* as evidence
+*against* the claim. Citing a supporting source for a refutation is not a citation, it
+is a mistake, and it is rejected exactly like an invented id.
+
+**3. Prose citations are salvaged.** The model often names its sources in the
+reasoning text and leaves the citations field empty. Rather than throw out a
+well-reasoned verdict over a formatting slip, ids are recovered from the prose with a
+regex — then checked by rules 1 and 2, so nothing invented survives the salvage.
+
+**4. No citation, no verdict.** A sub-verdict left with zero valid citations is
+forcibly downgraded to `insufficient evidence` with its confidence capped at 0.3.
+
+**5. Confidence has to be paid for.** Above 0.7 requires at least two *independent*
+credible sources, deduplicated by URL — one outlet repeating itself is not two sources
+agreeing.
+
+**6. The whole is never more certain than its most certain part.** Overall confidence
+is clamped to the highest sub-verdict confidence.
+
+**7. The overall verdict must follow from the parts.** If the judge returns an overall
+verdict that appears in none of its own sub-verdicts, it is overruled and derived
+instead: all-insufficient stays insufficient, supported-plus-refuted becomes
+contested, otherwise the most common sub-verdict wins, with confidence capped at 0.6.
+
+**8. Retracted sources are dropped entirely.** Not down-weighted — removed. A retracted
+paper is not weak evidence, it is withdrawn evidence. One run dropped three.
+
+Plus two budget rules: a hard search budget, and an early stop when confidence stops
+moving.
+
+---
+
+## 7. How a source is weighed
+
+This began as a hardcoded domain list — `.gov` and `nature.com` score 3, Wikipedia 2,
+everything else 1 — and that design failed in both directions. It let a homeopathy
+manufacturer's PDF onto the same panel as the NIH, because nobody thinks to add
+`cdn.boironusa.com` to a list. And it capped **The Lancet at 1.2** because
+`thelancet.com` was not on the list either. A list can only ever describe the *domain*.
+It cannot tell you that this particular article was retracted, or that this PDF is
+marketing.
+
+So the broker now audits the document, and the score is computed from that:
+
+```python
+def credibility(tier, publisher, evidence_type, conflict):
+    if publisher == "unknown":
+        score = float(tier)                     # fall back to the domain list
+    else:
+        score = float(PUBLISHER_CEILING[publisher])
+        if tier >= 2:                           # the list agrees it is reputable
+            score = max(score, float(tier))
+
+    score *= EVIDENCE_WEIGHT[evidence_type]
+
+    if conflict == "arguing_own_interest":
+        score *= 0.3
+    elif conflict == "arguing_against_own_interest":
+        score *= 1.3
+
+    return round(min(score, 3.0), 2)
+```
+
+| publisher | ceiling | | document type | weight |
+|---|---|---|---|---|
+| government, academic, journal | 3 | | meta-analysis | 1.2 |
+| encyclopedia, news | 2 | | trial | 1.1 |
+| advocacy, industry, personal | 1 | | observational | 1.0 |
+| unknown | domain list | | report | 0.9 |
+| | | | news article | 0.8 |
+| | | | **position paper** | **0.5** |
+| | | | **press release** | **0.4** |
+
+Final weight is `credibility × relevance`, and that is what ranks the evidence.
+
+**The conflict rule cuts both ways**, which is the part worth understanding. A
+homeopathy manufacturer arguing that homeopathy works scores **0.36**. The same
+manufacturer *conceding that it does not work* scores **1.17** — over three times
+more — because nobody argues against their own interest without reason. That is an
+admission against interest, and it is treated as unusually strong evidence.
+
+For comparison: a Cochrane meta-analysis with no stake scores **3.0**, an NIH report
+**2.7**, an advocacy position paper pushing its own field **0.36**.
+
+A dissenting source must clear **1.5** to earn a reserved seat on the panel, which is
+what keeps industry material off it without silencing genuine minority views.
+
+---
+
+## 8. The LangChain and LangGraph techniques, explained simply
+
+**Why LangGraph and not a chain.** A chain is a straight line: `prompt | model |
+parser`. This system needs to go *backwards* — judge back to the debaters for another
+round — and needs two nodes running at once. That is a graph with cycles, which is
+what LangGraph adds on top of LangChain. Everything below the graph layer is ordinary
+LangChain: prompts, models, structured output, tools, retrievers, `.invoke()`.
+
+**Nodes are plain functions: dict in, dict out.** Every node receives the *whole*
+state and returns only the keys it changed. That is why the judge can read evidence
+the broker gathered without anyone passing it along.
+
+**Reducers.** The subtle part. If two nodes run in parallel and both write the same
+key, LangGraph refuses rather than silently picking a winner — unless you say how to
+combine them:
 
 ```python
 raw_evidence: Annotated[list[dict], operator.add]   # both branches append
-searches_used: Annotated[int, operator.add]         # both branches add to the count
+searches_used: Annotated[int, operator.add]         # both branches add
 evidence: list[dict]                                # only the broker writes this
 ```
 
-`operator.add` on a list means "concatenate", on an int means "sum". Keys with no
-annotation are last-write-wins, which is fine when only one node writes them.
+**Conditional edges.** Branching is a function returning a node name — and returning a
+*list* of names runs them in parallel:
 
-**Structured output.** Every LLM call returns a Pydantic object, never free text —
-`Decomposition`, `SearchPlan`, `EvidenceGrades`, `Verdict`. This means no regex
-parsing and no "the model wrote a paragraph when I wanted a list". We call it with
-`include_raw=True`, which gives us the parsed object *and* the raw message, and the
-raw message carries `usage_metadata` — the token counts we turn into a dollar figure.
+```python
+def route(state):
+    if stop_reason(state):
+        return "report"
+    return ["prosecutor", "defender"]
+```
 
-**Tools.** `web_search`, `fetch_page` and `search_source` are decorated with `@tool`
-and called with `.invoke({...})`. They are plain functions with a docstring the model
-could read if we let it choose; here the graph calls them directly, which is a
-deliberate choice — the search *direction* is the whole point, so it is controlled by
-the node, not left to the model.
+**Structured output.** `llm.with_structured_output(Verdict, include_raw=True)` returns
+both the parsed object and the raw message, and the raw message carries
+`usage_metadata` — the real token counts behind every cost figure in the report.
 
-**RAG, optionally.** If you upload a PDF, paste text, or give a URL, the text is split
-with `RecursiveCharacterTextSplitter`, embedded with `text-embedding-3-small`, and put
-in a Chroma collection. Then `search_source` lets both debaters quote the document
-itself. Chunks from the document are exempted from the URL-dedupe rule, since they all
-share one "url".
+**Tool calling, and when to use it.** The rule this project settled on: *give the model
+a tool when the need is unpredictable; call it directly when the need is structural.*
+`web_search` is structural — the prosecutor node **is** "go search for refutations", so
+the node calls it and the model only decides *what* to search for. `current_datetime`
+is conditional: most claims do not need the date, some collapse without it, and only
+the model can tell which. So it is bound to the model:
 
-**Checkpointer.** The graph compiles with `InMemorySaver`, so every step of the run is
-saved under a thread id. That is what makes the run resumable and inspectable, and it
-is the hook a human-in-the-loop pause would attach to.
+```python
+talker = llm.bind_tools(allow_tools)
+ai = talker.invoke(messages)
+for call in ai.tool_calls:
+    answer = by_name[call["name"]].invoke(call["args"])
+    messages.append(ToolMessage(content=answer, tool_call_id=call["id"]))
+# then the structured call runs on the unbound model, with the tool result in context
+```
 
-**Streaming.** The Streamlit app uses `graph.stream(..., stream_mode="updates")`,
-which yields `{node_name: what_it_changed}` after each node. That is how the UI shows
-the debate happening live instead of freezing for a minute.
+Binding happens per call, not globally — `bind_tools` and `with_structured_output` both
+use the same underlying API, so binding tools *and* a response schema to one object
+makes them compete. Two phases avoids the collision.
+
+**Checkpointer.** The graph compiles with `InMemorySaver`, so every step is saved under
+a thread id. That is what makes a run inspectable and what a human-in-the-loop pause
+would attach to.
+
+**RAG, optionally.** Upload a PDF or paste a URL and the text is split, embedded, and
+put in a Chroma collection so both debaters can quote the document itself alongside
+the web.
 
 ---
 
-## 5. The files
+## 9. The files
 
 | file | lines | what it holds |
 |------|-------|---------------|
-| `config.py` | ~65 | models, budgets, pricing table, source credibility tiers, cost maths |
-| `schemas.py` | ~78 | every Pydantic output model + the graph state with its reducers |
-| `tools.py` | ~80 | web search, page fetch, and retrieval over the user's document |
-| `engine.py` | ~450 | the prompts, the six nodes, the graph wiring, the report card |
-| `app.py` | ~185 | Streamlit demo, streams the debate live |
-| `evaluate.py` | ~145 | the eval harness and the scorecard |
+| `config.py` | ~130 | models, budgets, pricing, credibility model, all tunables |
+| `schemas.py` | ~100 | every structured output plus the graph state |
+| `tools.py` | ~100 | the clock, web search, page fetch, retrieval over your document |
+| `engine.py` | ~770 | prompts, six nodes, guardrails, the graph, the report card |
+| `app.py` | ~380 | Streamlit demo, streams the debate live, explains every score |
+| `evaluate.py` | ~300 | eval harness, baseline, scorecards, comparisons |
 
-Everything tunable lives in `config.py` so you never hunt through the engine to change
-a budget. `MAX_ROUNDS`, `SEARCH_BUDGET`, `SETTLED_DELTA`, `CONFIDENCE_CAP`,
-`MINORITY_BAR` and the tier table are all one-line edits.
-
----
-
-## 6. The guardrails (what code enforces, not prompts)
-
-This is the part worth defending in an interview. A prompt is a request. Code is a
-guarantee. Five rules are enforced after the judge returns, in `engine.py`:
-
-1. **Fabricated citations are stripped.** Every cited id is checked against the real
-   evidence ids. Invented ones are deleted and counted.
-2. **Citations must point the same way the verdict does.** A `refuted` verdict may
-   only cite evidence graded `refutes`. Citing a supporting meta-analysis as grounds
-   for a refutation is not a citation, it is a mistake, and it is rejected the same way
-   a fabricated id is.
-3. **No citation, no verdict.** A sub-verdict left with zero valid citations is
-   forcibly downgraded to `insufficient evidence` with its confidence capped at 0.3.
-4. **Confidence has to be paid for.** Above 0.7 requires at least two *independent*
-   credible sources (tier ≥ 2, deduplicated by URL — one outlet repeating itself is
-   not two sources agreeing). Otherwise it is capped.
-5. **The whole cannot be more certain than its most certain part.** Overall confidence
-   is clamped to the highest sub-verdict confidence.
-
-Every one of these is counted and printed in the report card's run log. The number of
-fabricated citations rejected is the statistic most demos quietly hide.
+Everything tunable lives in `config.py`, so you never hunt through the engine to change
+a budget or a weight.
 
 ---
 
-## 7. Problems we hit, and what we did about them
+## 10. What it scores, and against what
 
-This is the honest build log, in order.
-
-### Before the first run
-
-**Problem 1 — unknown state keys.** Nodes were returning `past_queries` and `graded`,
-but neither was declared in the `State` TypedDict. LangGraph rejects updates to keys
-it does not know about. *Fix:* declared both, with `operator.add` on `past_queries`
-since both debaters write it.
-
-**Problem 2 — the routing function's writes vanished.** `route()` was setting
-`state["stop_reason"] = ...` so the report could explain why the debate ended. But a
-conditional edge function only *reads* state to pick a path; anything it mutates is
-thrown away. *Fix:* pulled the logic into a pure `stop_reason(state)` helper that both
-`route` and `report` call. The reason is now derived, never stored.
-
-### First live run — "Vitamin C prevents the common cold"
-
-The verdict was right (contested — refuted on incidence, contested on duration, which
-matches the real literature), but three things were visibly wrong.
-
-**Problem 3 — the neutral restatement destroyed the claim.** "Vitamin C prevents the
-common cold" was restated as "Vitamin C may have effects on the common cold." That is
-not neutral, it is *unfalsifiable* — it can never be wrong, so there is nothing to
-test. *Fix:* the prompt now says strip the spin but keep the assertion exactly as
-strong as it was, with that exact failure as a worked example.
-
-**Problem 4 — the same source counted three times.** One PubMed meta-analysis appeared
-as E1, E13 and E20 because the dedupe key was `url + first 120 chars of snippet`, and
-the same page surfaced with different snippet text each time. Three slots of a
-nine-slot evidence budget, one source. *Fix:* dedupe on URL alone. Chunks of the
-user's uploaded document are the one exception, since they all share a single "url".
-
-**Problem 5 — the stop reason was misleading.** The run log said "search budget spent"
-when the confidence had also settled. Both were true, but budget was checked first.
-*Fix:* check "settled" first, because it is the informative reason. Budget bumped from
-12 to 18 so three full rounds are actually reachable.
-
-### Eval run 1 — 33% accuracy
-
-This is where it gets interesting. The evals found two design flaws that reading the
-code would never have surfaced.
-
-**Problem 6 — the broker was manufacturing fake balance.** "Handwashing with soap
-reduces transmission of infectious disease" came back **contested**. The cause: the
-broker was reserving *half* its evidence slots for each stance. When almost no genuine
-refutation exists, that guarantee fills those slots with scraps, the judge sees an even
-split, and calls it contested. The system was inventing a controversy.
-*Fix:* keep the strongest evidence by score, and give the minority side a couple of
-slots only if its evidence clears a quality bar. Also started showing the judge the
-evidence *balance* — counts and average strength per side — so it can see that one
-side is nine strong sources and the other is one weak one.
-
-**Problem 7 — absence of evidence was treated as refutation.** "There are exactly
-4,382 blue cars in Oslo today" came back **refuted**. Nobody has ever published a
-rebuttal to a number nobody measured. The honest answer is "I cannot know this".
-*Fix:* the judge prompt now states that `refuted` requires evidence that *positively
-contradicts* the claim, and that an unaddressed claim is `insufficient evidence`
-however implausible it sounds. This worked immediately and has held ever since.
-
-### Eval run 2 — 67% accuracy, but handwashing got *worse*
-
-Oslo was fixed. Handwashing went from "contested" to **"refuted" at 90% confidence** —
-more confident and more wrong. And the calibration gap was **-45%**: the engine was
-*more* confident when it was wrong than when it was right, which is the worst possible
-property for a tool whose entire job is telling you how much to trust something.
-
-**Problem 8 — binary stance labels were crushing nuance.** Many real sources say
-things like "handwashing reduces gastrointestinal illness but the respiratory evidence
-is weaker". That is a source *narrowing* the claim, not opposing it. With only
-supports/refutes/irrelevant available, the broker had to file it as "refutes", and the
-judge counted it as an attack. *Fix:* added a fourth stance, **`qualified`**, with the
-prompt explicitly saying a qualified source narrows the claim and is not a refutation.
-
-**Problem 9 — the judge was reasoning from source counts.** Because one agent searches
-only for refutations, the number of sources on each side measures *how hard each agent
-searched*, not the weight of the literature. The judge did not know that. *Fix:* the
-judge prompt now explains exactly how the evidence was sampled and forbids reasoning
-from counts. Read what the sources say, never how many there are.
-
-**Problem 10 — confidence was free.** Nothing stopped the judge asking for 90% on a
-single thin source. *Fix:* the calibration guard in section 6 — above 0.7 you need two
-independent credible sources, enforced in code, counted in the report. The calibration
-gap went from -45% to -10% immediately.
-
-**Problem 11 — our own metric was wrong.** Citation integrity dropped to 62%, and it
-looked like a regression. It was not. The Oslo run had correctly returned
-`insufficient evidence` citing nothing, and the metric was counting that as a citation
-failure — it was punishing the engine for being honest. *Fix:* citation integrity now
-scores only sub-verdicts that actually made a call. Worth saying plainly: **the
-measurement was the bug**, and if we had trusted the number instead of reading it we
-would have "fixed" correct behaviour.
-
-### Eval run 3 — the real culprit, found by reading a report
-
-Accuracy stayed at 67%, handwashing still refuted. So instead of guessing again we
-opened the actual report card in `reports/` and read the evidence list. It was damning:
-
-- Seven **supporting** sources: CDC, a Lancet meta-analysis, several PMC/PubMed
-  systematic reviews.
-- One **refuting** source: `handwashingforlife.org`, relevance 0.50, **tier 1** — an
-  SEO blog arguing hand sanitiser beats soap.
-
-The judge had hung **all three sub-verdicts on that blog**. Worse, for S1 it cited
-**E5, the Lancet meta-analysis showing a 17% reduction, as evidence against the
-claim.** It cited a supporting source for a refutation.
-
-Three fixes, one per hole:
-
-**Problem 12 — citations pointing the wrong way were accepted.** We checked that a
-cited id *existed*, never that it *agreed*. *Fix:* stance alignment, guardrail 2 in
-section 6. A `refuted` verdict may only cite `refutes` evidence; anything else is
-stripped exactly like a fabricated id.
-
-**Problem 13 — the minority slot was a loophole.** The guarantee we added in problem 6
-is what let a 0.50-relevance blog sit at the same table as the Lancet, because it was
-the only dissenting voice available. *Fix:* to hold a reserved slot against the weight
-of the evidence, a source must be either credible (tier ≥ 2) or squarely on point
-(relevance ≥ 0.7). Dissent is still protected; unsourced noise is not.
-
-**Problem 14 — nothing told the judge that tier matters.** The tiers were computed,
-displayed, and used for ranking, but the judge was never told how to weigh them.
-*Fix:* an explicit rule — a tier 1 source cannot outweigh tier 3 sources, and if your
-verdict rests on tier 1 while tier 3 says the opposite, you have read it backwards.
-
-### Eval run 4 — the calibration finally points the right way
-
-The stance-alignment rule immediately caught **8 misaligned citations** across three
-runs, and the calibration gap flipped from **-10% to +30%** — the engine is now more
-confident when it is right than when it is wrong, which is the property that makes a
-confidence number worth printing at all. The blog was gone from the evidence entirely:
-handwashing came back 7 supporting, 1 qualified, 0 refuting.
-
-But C2 was still a miss, now as `insufficient evidence`. Reading the report showed
-something almost funny: S1's reasoning said *"E4 shows a substantial reduction in
-bacteria and viruses after handwashing with soap"* — and its citation list was
-**empty**, so our own rule from section 6 downgraded it.
-
-**Problem 15 — gaps in the evidence ids invited the judge to guess.** Ids are assigned
-globally when evidence is graded, but only the strongest few are shown to the judge.
-So the judge sees E1, E2, E3, E4, E7, E8, E9, E13 — a list full of holes — and cites
-E5 or E6, which it never saw. Those got stripped as fabricated, leaving verdicts with
-no citations, which then got downgraded. The guardrail was working perfectly on a
-problem we had created ourselves.
-*Fix:* the broker now renumbers the kept evidence contiguously from E1 before the
-judge sees it (on copies, so the grading cache keeps its own stable ids), and the
-prompt says the list is numbered from E1 with no gaps. Each kept item retains a
-`source_id` pointing back at its grading id, so nothing loses traceability.
-
-This one is worth remembering as a general lesson: **the model was not being careless,
-the interface was bad.** A list with holes in it is a trap, and the fix was to stop
-setting the trap rather than to add another rule about it.
-
-### Eval run 5 — the trap is gone, and one honest miss remains
-
-Fabricated citations fell to **zero**. Every id the judge cited was one it had actually
-been shown, which confirms problem 15 was an interface bug and not a model that lies.
-Calibration held positive at **+20%**, cost settled at **$0.0020** per audit.
-
-One claim is still wrong, and it is worth being straight about it. "Handwashing with
-soap reduces transmission of infectious disease" returns `insufficient evidence` when
-the right answer is `supported`. It is no longer *confidently wrong* — that was the
-dangerous failure and it is fixed — but it is still wrong.
-
-The cause is now visible in the report: `decompose` splits the claim into demanding
-pieces like *"handwashing leads to a decrease in the incidence of infectious diseases
-in populations"*, and a 600-character search snippet from a CDC page genuinely does
-not settle a population-level epidemiological question. The judge is being strict, and
-given what it was shown, it is being strict *correctly*. The fix is not another rule
-for the judge — it is giving it better evidence: fetching the full text of top-tier
-results instead of judging a meta-analysis by its abstract snippet, and adding PubMed
-as a real tool. Both are in the limitations list, and both are the right next commit.
-
-That distinction — a system that is wrong because it reasoned badly, versus one that is
-wrong because it was starved of evidence and said so — is the whole point of measuring
-this stuff.
-
----
-
-## 8. How the scorecard moved
-
-| run | accuracy | citation integrity | calibration gap | what changed after |
-|-----|----------|-------------------|-----------------|--------------------|
-| 1 | 33% | 100% | +17% | false balance removed, absence ≠ refutation |
-| 2 | 67% | 62%* | -45% | `qualified` stance, sampling warning, confidence cap |
-| 3 | 67% | 100% | -10% | stance-aligned citations, earned minority slots, tier rule |
-| 4 | 67% | 100% | **+30%** | contiguous evidence ids for the judge |
-| 5 | 67% | 100% | **+20%** | zero fabricated citations; remaining miss is evidence depth |
-
-\* not a real regression — that was problem 11, the metric punishing an honest refusal.
-
-Cost per audit stayed around **$0.0020–0.0025** and latency around **45–55 seconds**
-throughout, on `gpt-4o-mini` for every role.
-
-Accuracy sat at 67% from run 2 onward, and that number alone hides the whole story.
-What actually improved across those runs was *how* the engine was wrong: run 2 was
-confidently wrong on a well-established claim (refuted at 90%), run 5 declines to rule
-and says why (insufficient evidence at 30%). For a tool whose job is telling you how
-much to trust a claim, that is the difference between dangerous and useful — and it is
-why the scorecard tracks four metrics instead of one.
-
----
-
-## 9. What is measured, and why
-
-`evaluate.py` runs the engine against claims whose answer is already known
-(`evals/claims.json`) and scores four things. Accuracy alone would be a bad grade for
-this kind of system, because a system can be right for terrible reasons.
+`evaluate.py` runs the engine against claims whose answers are already known and
+measures five things. Accuracy alone would be a poor grade, because a system can be
+right for terrible reasons.
 
 | metric | what it catches |
 |--------|-----------------|
 | **verdict accuracy** | does it land on the known-correct call |
 | **citation integrity** | of the verdicts that made a call, how many rest on real, aligned evidence |
-| **framing robustness** | does the verdict survive the claim being asked in a leading, flattering way |
+| **framing robustness** | does the verdict survive the claim being asked in a leading way |
 | **calibration gap** | is it more confident when right than when wrong (negative is an alarm) |
+| **stability** | do repeated runs of the same claim agree (below 100% means single-run results are partly noise) |
 
-**Framing robustness** is the one worth talking about. Every claim in the dataset has a
-`leading` twin that pushes hard for the wrong answer — *"Surely you agree handwashing
-with soap does nothing for disease transmission?"* A sycophantic system agrees with
-whoever asked. This engine's verdict is supposed to be **identical** either way, and
-the scorecard reports the percentage of the time it held. Run the full
-`python evaluate.py` to produce that number; `--quick` skips the twins.
+There are two claim sets and a control.
 
-The dataset deliberately mixes four kinds of claim: clearly false (vaccines/autism),
-clearly true (handwashing), genuinely disputed (coffee and lifespan, remote work),
-and **unknowable** (blue cars in Oslo). That last category is the one most systems
-fail, because refusing to answer is not a behaviour anyone trains for.
+**`claims.json`** — 12 timeless, well-known claims: vaccines and autism, the Great
+Wall from space, blue cars in Oslo. **`claims-hard.json`** — 20 claims across 10
+categories, each designed so that recall alone cannot solve it: date arithmetic,
+current facts, stale consensus, compound claims with one false half, magnitude traps,
+absolute quantifiers, genuinely contested questions, and the unknowable.
 
----
-
-## 10. Known limitations
-
-Being straight about these is better than being caught by them.
-
-- **The eval set is small** — six claims. It catches structural bugs, which is what it
-  was for, but it is not a benchmark, and 67% on six claims has wide error bars.
-- **We only see search snippets**, not full articles. `fetch_page` exists but is used
-  for source ingestion, not for every result, because reading twenty pages per round
-  would be slow and expensive. Some of the grading errors trace back to judging a
-  paper by its 600-character abstract snippet.
-- **The broker is an LLM grading evidence for another LLM.** Its stance labels are
-  where the pipeline is most fragile, as problems 8 and 13 showed.
-- **`gpt-4o-mini` for every role.** Pointing `JUDGE_MODEL` at `gpt-4o` is a one-line
-  change in `config.py`, and re-running the eval would tell you whether the stronger
-  judge pays for itself — which is itself a good result to publish.
-- **DuckDuckGo has no academic index.** A proper version would add PubMed and arXiv as
-  first-class tools.
-- **No human-in-the-loop pause yet.** The checkpointer is in place, so adding an
-  interrupt before the final ruling is a small change.
+**The baseline** is the same claims put to a strong model in one call, no agent. Every
+claim also has a `leading` twin that pushes hard for the wrong answer, so sycophancy is
+measured rather than assumed.
 
 ---
 
-## 11. If someone asks you about this project
+## 11. Results
 
-The demo is the hook, but the story is the eval loop. Roughly:
+### On easy, well-known claims, the agent loses
+
+| | agent `4o-mini` | baseline `gpt-4.1` |
+|---|---|---|
+| accuracy | 75% | **92%** |
+| cost per audit | $0.0046 | **$0.0011** |
+| latency | 79s | **1s** |
+| calibration gap | **+17%** | −13% |
+
+A strong model recites textbook facts perfectly and instantly. Building an agent for
+those is wasted effort. But note the baseline's calibration: **91% confident when
+wrong** versus 88% when right. Wrong, fast, and certain.
+
+### On claims that require checking, it wins decisively
+
+| | baseline | agent `4o-mini` | agent `4.1-mini` |
+|---|---|---|---|
+| accuracy | 50% | 50% | **75%** |
+| date arithmetic | **0/6** | 3/6 | **6/6** |
+| current facts | 0/1 | 1/1 | 1/1 |
+| citation integrity | 0% | 100% | 100% |
+| calibration gap | −3% | +5% | **+6%** |
+
+The baseline is perfect on everything it memorised and **zero on everything requiring
+a clock**. The agent wins exactly the categories it was built for, including the two
+unanswerable claims the baseline ruled on confidently.
+
+### The model upgrade only pays off on hard problems
+
+`gpt-4o-mini` → `gpt-4.1-mini` bought **+0%** on the easy set for 2.8× the cost, and
+**+25 points** on the hard set. The gain landed precisely where the failure analysis
+predicted: date arithmetic went 3/6 → 6/6, because those failures were *subtraction*
+errors, not knowledge errors.
+
+### What it still gets wrong
+
+Framing robustness sits at **45%**, below the baseline's 70% — a leading question
+changes the search queries, so the two runs see different evidence. `contested` remains
+the weakest verdict. And the stronger model is *more* willing to rule on unanswerable
+claims: better reasoning, worse epistemic humility.
+
+---
+
+## 12. Problems hit, and what fixed them
+
+The honest build log. Several of these are mistakes in the *measurement*, not the
+system — which is itself the lesson.
+
+**1. Unknown state keys.** Nodes returned keys the `State` TypedDict did not declare;
+LangGraph rejects those. Declared them, with reducers where two nodes write.
+
+**2. The routing function's writes vanished.** A conditional edge only *reads* state to
+pick a path; anything it mutates is discarded. Moved to a pure `stop_reason(state)`
+helper that both the router and the report call.
+
+**3. The neutral restatement destroyed the claim.** "Vitamin C prevents colds" became
+"may have effects on colds" — unfalsifiable, so untestable. The prompt now demands the
+assertion keep its original strength.
+
+**4. One source counted three times.** The dedupe key included the snippet, so the same
+paper surfaced three times with different snippet text and took three of nine evidence
+slots. Dedupe on URL alone.
+
+**5. Misleading stop reason.** Reported "budget spent" when the confidence had also
+settled. Settled is now checked first because it is the informative reason.
+
+**6. The broker manufactured false balance.** It reserved *half* the evidence slots for
+each stance, so when no real refutation existed it filled them with scraps and the
+judge called it contested. The system was inventing controversy. Fixed: rank by score,
+and the minority side earns slots only by clearing a quality bar.
+
+**7. Absence of evidence read as refutation.** "There are exactly 4,382 blue cars in
+Oslo" came back *refuted*. Nobody publishes a rebuttal to a number nobody measured.
+`refuted` now requires evidence that positively contradicts.
+
+**8. Binary stance crushed nuance.** Sources saying "reduces gastrointestinal illness
+but not respiratory" had to be filed as refutations. Added the `qualified` stance.
+
+**9. The judge reasoned from source counts.** Because one agent searches only for
+refutations, counts measure search effort, not the literature. The judge is now told
+exactly how the evidence was sampled and forbidden to count sides.
+
+**10. Confidence was free.** Nothing stopped 90% on one thin source. Added the
+calibration guard; the gap went from −45% to −10% immediately.
+
+**11. Our own metric was wrong.** Citation integrity "dropped" to 62%, but it was
+counting an honest `insufficient evidence` refusal as a citation failure — punishing
+the engine for being correct. **The measurement was the bug**, and trusting the number
+would have meant "fixing" right behaviour.
+
+**12. Citations pointing the wrong way were accepted.** We checked that a cited id
+*existed*, never that it *agreed*. Added stance alignment.
+
+**13. The minority slot was a loophole.** It let a 0.50-relevance SEO blog sit beside
+the Lancet, because it was the only dissenting voice available. Dissent must now be
+credible to hold a reserved seat.
+
+**14. Nothing told the judge that source quality outranks source count.** Tiers were
+computed and displayed but never explained to it.
+
+**15. Gaps in the evidence ids invited guessing.** The judge saw E1, E2, E4, E9, E13 —
+a list full of holes — and cited E5, which it had never seen. Those were stripped as
+fabricated, leaving verdicts with no citations, which were then downgraded. The
+guardrail was working perfectly on a problem we had created. Fixed by renumbering the
+kept evidence contiguously. **The model was not being careless; the interface was bad.**
+
+**16. The engine did not know what day it was.** Asked whether Trump is the current US
+president, it answered **refuted at 100% confidence**, having restated the claim "as of
+October 2023" — its own training cutoff. Every component then worked correctly on a
+wrong clock: the broker graded "Trump is the incumbent as of January 2025" as a
+*refutation*, because relative to 2023 that had not happened. Fixed with a
+`current_datetime` tool the model calls when it decides it needs to, threaded through
+state to every downstream node. The verdict became **supported at 70%**.
+
+**17. Two Wikipedia pages counted as two independent sources.** The confidence guard
+deduplicated by URL, so two articles on one site cleared the "two independent sources"
+bar and allowed 100% confidence.
+
+**18. The domain list failed in both directions.** It let `cdn.boironusa.com` — a
+homeopathy manufacturer's CDN — weigh against the NIH, and capped The Lancet at 1.2
+because `thelancet.com` was not on the list. Replaced with the per-document audit in
+section 7.
+
+**19. A conflict direction I made the code derive.** The first version asked the model
+whether the publisher benefited if the claim were *true or false*, then combined that
+with the stance. On a negated claim the model got the direction backwards, and a 0.3×
+penalty became a 1.3× bonus — a 4.3× swing from one misread. Fixed by asking for one
+judgement — "is this source serving its own interest here?" — instead of a direction
+plus arithmetic.
+
+**20. The judge cited in prose and left the field empty.** Its reasoning read "Sources
+E1 and E3 explicitly state…" while `citations` was `[]`, so the no-citation rule
+correctly downgraded a well-reasoned verdict. Added the salvage in guardrail 3.
+
+**21. The judge prompt collapsed under its own weight.** After fifteen accumulated
+rules it began returning an overall verdict contradicting its own sub-verdicts. Rules
+moved into code; the prompt went back to five.
+
+**22. Tuning on a single run.** The same claim came back refuted, then insufficient,
+then contested, with nothing changed. Run-to-run variance was larger than the effects
+being claimed — so some of the "fixes" and "regressions" above were probably neither.
+Added `--trials N` with majority voting and a stability metric.
+
+---
+
+## 13. Known limitations
+
+- **Only search snippets are read**, not full articles. Some grading errors trace
+  directly to judging a paper by its 600-character abstract.
+- **The broker is an LLM grading evidence for another LLM**, and its stance labels are
+  where the pipeline is most fragile.
+- **`contested` is still the weakest verdict**, and framing robustness is below the
+  baseline's.
+- **The eval sets are small** — 12 and 20 claims. They catch structural bugs, which is
+  what they are for, but they are not benchmarks.
+- **DuckDuckGo has no academic index.** PubMed and arXiv as first-class tools would
+  help more than any prompt change.
+- **Two time-sensitive eval rows** will need re-labelling as the world moves on.
+- **No human-in-the-loop pause yet**, though the checkpointer is already in place.
+
+---
+
+## 14. Running it
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # add your OPENAI_API_KEY
+
+streamlit run app.py                                  # the demo
+python engine.py "your claim"                         # cli report card
+python engine.py --bare "your claim"                  # the no-agent control
+python engine.py --vs "your claim"                    # both, side by side
+python evaluate.py --claims claims-hard.json          # score it
+python evaluate.py --trials 3 --only H11,H18          # majority voting
+python evaluate.py --compare A B C                    # compare runs
+```
+
+`--fast`, `--big` and `--huge` swap models; `--judge <model>` upgrades only the
+decisive call. Deployment uses Streamlit secrets for the key, with an optional password
+gate and a demo mode that caps what one visitor can spend.
+
+---
+
+## 15. The short version, if someone asks
 
 > I built an adversarial fact-checking agent — prosecutor, defender, broker, judge, in
-> a cyclic LangGraph. But the interesting part is that I wrote an eval harness for it,
-> and it scored 33%. The evals found two design flaws I would never have caught by
-> reading the code: the broker was manufacturing fake controversy by reserving half its
-> evidence slots per side, and the judge was treating absence of evidence as
-> refutation. Then it got *more* confident and *more* wrong, so I opened a failing
-> report and found the judge had based a refutation on an SEO blog while citing a
-> Lancet meta-analysis as evidence against the claim. So now citations have to point
-> the same direction as the verdict, dissent has to be credible to get a reserved
-> slot, and confidence above 0.7 requires two independent credible sources — all
-> enforced in code, not in a prompt, because a prompt is a request and code is a
-> guarantee.
+> a cyclic LangGraph. The interesting part is that I also wrote an eval harness and a
+> no-agent control, and the control **beat** my agent 92% to 75% on well-known claims,
+> at a quarter the cost and a fraction of the time. So I built a second eval set where
+> the answer could not be recalled, only checked — and there the agent won 75% to 50%,
+> with the plain model scoring **zero out of six** on anything requiring today's date.
+> That is the actual finding: the machinery is worth its cost exactly when the answer
+> is not already in the model's weights. Along the way the evals found design flaws I
+> would never have caught by reading code — a broker manufacturing fake controversy, a
+> judge treating absence of evidence as refutation, and an industry-funded PDF
+> outweighing the NIH. The fixes are enforced in code rather than requested in prompts,
+> because a prompt is a request and code is a guarantee.
 
-That is a story about measuring your own system and being wrong in public, which is
-the job. Almost nobody's portfolio project can tell it.
+That is a story about measuring your own work and being wrong in public, which is the
+job.
