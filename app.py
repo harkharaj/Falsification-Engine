@@ -59,7 +59,7 @@ def apply_demo_caps():
     config.FAST_MODEL = config.JUDGE_MODEL = "gpt-4o-mini"
 
 
-def render_gate(owner_key, password):
+def render_gate(owner_key, password, demo):
     """Two ways in: bring your own key, or borrow the author's with a password."""
     st.title("Falsification Engine")
     st.caption(
@@ -94,9 +94,10 @@ def render_gate(owner_key, password):
         else:
             guess = st.text_input("Password", type="password", key="pw_input")
             st.caption(
-                "Runs on the author's key, so it is capped: 2 debate rounds, "
-                "8 searches, `gpt-4o-mini`. Do not have the password? Use your "
-                "own key on the other tab."
+                "Runs on the author's key, capped at 2 debate rounds, 8 "
+                "searches and `gpt-4o-mini`."
+                if demo else
+                "Runs on the author's key, at the full search budget."
             )
             if st.button("Unlock the demo"):
                 if guess == password:
@@ -117,6 +118,7 @@ def setup_access():
     """
     owner_key = secret("OPENAI_API_KEY")
     password = secret("APP_PASSWORD")
+    demo = bool(secret("DEMO_MODE"))
 
     if not st.session_state.get("api_key"):
         env_key = os.environ.get("OPENAI_API_KEY")
@@ -125,9 +127,9 @@ def setup_access():
             st.session_state["api_key"] = env_key
             st.session_state["key_source"] = "local"
         else:
-            render_gate(owner_key, password)
+            render_gate(owner_key, password, demo)
 
-    if secret("DEMO_MODE") and st.session_state.get("key_source") == "owner":
+    if demo and st.session_state.get("key_source") == "owner":
         apply_demo_caps()
         return True
     return False
@@ -166,11 +168,14 @@ with st.sidebar:
             st.session_state.clear()
             st.rerun()
     elif source == "owner":
-        st.info(
-            f"Shared demo key: {config.MAX_ROUNDS} rounds, "
-            f"{config.SEARCH_BUDGET} searches, `{config.FAST_MODEL}`. "
-            "Paste your own key instead to lift the caps."
-        )
+        if DEMO:
+            st.info(
+                f"Shared key: {config.MAX_ROUNDS} rounds, "
+                f"{config.SEARCH_BUDGET} searches, `{config.FAST_MODEL}`. "
+                "Paste your own key instead to lift the caps."
+            )
+        else:
+            st.info("Running on the shared key, at the full search budget.")
         if st.button("Sign out"):
             st.session_state.clear()
             st.rerun()

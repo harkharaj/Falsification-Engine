@@ -134,7 +134,7 @@ gives you two ways in:
 | | what it costs you | limits |
 |---|---|---|
 | **Paste your own OpenAI key** | your own credit, a few cents an audit | none — full rounds, full search budget, any model |
-| **Enter the demo password** | nothing, it runs on my key | 2 debate rounds, 8 searches, `gpt-4o-mini` |
+| **Enter the demo password** | nothing, it runs on my key | same, but I can throttle it from the deployment if it gets abused |
 
 The password is not published here. If you want to try it without a key of your own,
 ask me for it.
