@@ -1,5 +1,6 @@
 """All the knobs in one place: models, budgets, pricing, stop rules."""
 
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -50,12 +51,24 @@ DOMAIN_TIERS = {
 }
 
 
+# Whose key the audit currently running is spending. The Streamlit app sets this
+# for the duration of one run and clears it afterwards, holding a process-wide
+# lock while it does, so a visitor who pasted their own key can never have it
+# picked up by somebody else's run. None means "fall back to OPENAI_API_KEY in
+# the environment", which is what the CLI and the eval harness do.
+ACTIVE_API_KEY = None
+
+
+def _key():
+    return ACTIVE_API_KEY or os.environ.get("OPENAI_API_KEY")
+
+
 def get_model(name=FAST_MODEL, temperature=0):
-    return ChatOpenAI(model=name, temperature=temperature)
+    return ChatOpenAI(model=name, temperature=temperature, api_key=_key())
 
 
 def get_embeddings():
-    return OpenAIEmbeddings(model="text-embedding-3-small")
+    return OpenAIEmbeddings(model="text-embedding-3-small", api_key=_key())
 
 
 # A domain list can only ever describe the DOMAIN. It cannot tell you that this

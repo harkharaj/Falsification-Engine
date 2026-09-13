@@ -4,6 +4,22 @@ run with:  streamlit run app.py
 """
 
 import os
+import sys
+import threading
+
+# Streamlit Cloud ships an old system sqlite3 on some images, and chromadb (via
+# langchain_chroma, imported by tools) refuses to load against anything below
+# 3.35. pysqlite3-binary is a modern sqlite3 built as a wheel; swap it in before
+# anything imports chromadb. Locally this is a no-op - the wheel is linux-only
+# and the system sqlite3 is already new enough.
+try:                                    # pragma: no cover - deployment shim
+    import sqlite3
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        __import__("pysqlite3")
+        sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
+
 from datetime import datetime
 
 import streamlit as st
@@ -24,44 +40,95 @@ def secret(name, fallback=None):
         return fallback
 
 
-def setup_access():
-    """Key, password gate and demo limits for a deployed app.
+@st.cache_resource
+def run_lock():
+    """One audit at a time, process wide.
 
-    Locally none of this fires: load_dotenv() in config.py finds the .env and
-    there is no APP_PASSWORD, so the app behaves exactly as before.
+    config.ACTIVE_API_KEY is a module global, so two audits overlapping inside
+    the same Streamlit process could otherwise read each other's key. Serialising
+    runs keeps that global honest, and on a demo it is a reasonable cost control
+    besides.
     """
-    key = secret("OPENAI_API_KEY")
-    if key:
-        os.environ["OPENAI_API_KEY"] = key
+    return threading.Lock()
 
+
+def apply_demo_caps():
+    """Cap what one visitor can spend on the author's key."""
+    config.MAX_ROUNDS = 2
+    config.SEARCH_BUDGET = 8
+    config.FAST_MODEL = config.JUDGE_MODEL = "gpt-4o-mini"
+
+
+def render_gate(owner_key, password):
+    """Two ways in: bring your own key, or borrow the author's with a password."""
+    st.title("Falsification Engine")
+    st.caption(
+        "An audit costs real OpenAI credit, so pick which key pays for it."
+    )
+
+    own, borrow = st.tabs(["Use your own API key", "Use the demo password"])
+
+    with own:
+        entered = st.text_input(
+            "OpenAI API key", type="password", key="byok_input",
+            placeholder="sk-...",
+        )
+        st.caption(
+            "Held in this browser session only. It is never written to disk, "
+            "never logged, and never put in a process-wide variable another "
+            "visitor could read. Close the tab and it is gone."
+        )
+        if st.button("Start with my key", type="primary"):
+            if not entered.strip():
+                st.error("Paste a key first.")
+            elif not entered.strip().startswith("sk-"):
+                st.error("That does not look like an OpenAI key.")
+            else:
+                st.session_state["api_key"] = entered.strip()
+                st.session_state["key_source"] = "visitor"
+                st.rerun()
+
+    with borrow:
+        if not (owner_key and password):
+            st.info("The shared demo key is not configured on this deployment.")
+        else:
+            guess = st.text_input("Password", type="password", key="pw_input")
+            st.caption(
+                "Runs on the author's key, so it is capped: 2 debate rounds, "
+                "8 searches, `gpt-4o-mini`. Do not have the password? Use your "
+                "own key on the other tab."
+            )
+            if st.button("Unlock the demo"):
+                if guess == password:
+                    st.session_state["api_key"] = owner_key
+                    st.session_state["key_source"] = "owner"
+                    st.rerun()
+                else:
+                    st.error("Not that one.")
+
+    st.stop()
+
+
+def setup_access():
+    """Work out whose key this session spends, and how much it may spend.
+
+    Locally none of this renders: load_dotenv() in config.py finds the .env,
+    no password is configured, and the app behaves exactly as it always did.
+    """
+    owner_key = secret("OPENAI_API_KEY")
     password = secret("APP_PASSWORD")
-    if password and not st.session_state.get("unlocked"):
-        st.title("Falsification Engine")
-        st.caption("This demo runs on the author's API key, so it is password "
-                   "protected. The password is in the README.")
-        entered = st.text_input("Password", type="password")
-        if entered == password:
-            st.session_state["unlocked"] = True
-            st.rerun()
-        if entered:
-            st.error("Not that one.")
-        st.stop()
 
-    # No key anywhere? Let visitors bring their own rather than showing a crash.
-    if not os.environ.get("OPENAI_API_KEY"):
-        st.title("Falsification Engine")
-        st.warning("No API key configured. Paste your own OpenAI key to try it - "
-                   "it is used for this session only and never stored.")
-        entered = st.text_input("OpenAI API key", type="password")
-        if not entered:
-            st.stop()
-        os.environ["OPENAI_API_KEY"] = entered
+    if not st.session_state.get("api_key"):
+        env_key = os.environ.get("OPENAI_API_KEY")
+        if env_key and not password:
+            # Running locally off a .env. Nothing to gate.
+            st.session_state["api_key"] = env_key
+            st.session_state["key_source"] = "local"
+        else:
+            render_gate(owner_key, password)
 
-    # On a public deployment, cap what a visitor can spend per audit.
-    if secret("DEMO_MODE"):
-        config.MAX_ROUNDS = 2
-        config.SEARCH_BUDGET = 8
-        config.FAST_MODEL = config.JUDGE_MODEL = "gpt-4o-mini"
+    if secret("DEMO_MODE") and st.session_state.get("key_source") == "owner":
+        apply_demo_caps()
         return True
     return False
 
@@ -92,11 +159,21 @@ st.caption(
 
 # --- inputs --------------------------------------------------------------
 with st.sidebar:
-    if DEMO:
+    source = st.session_state.get("key_source")
+    if source == "visitor":
+        st.success("Running on your own API key.")
+        if st.button("Forget my key and sign out"):
+            st.session_state.clear()
+            st.rerun()
+    elif source == "owner":
         st.info(
-            f"Demo mode: {config.MAX_ROUNDS} rounds, {config.SEARCH_BUDGET} "
-            f"searches, `{config.FAST_MODEL}`. Run it locally to change these."
+            f"Shared demo key: {config.MAX_ROUNDS} rounds, "
+            f"{config.SEARCH_BUDGET} searches, `{config.FAST_MODEL}`. "
+            "Paste your own key instead to lift the caps."
         )
+        if st.button("Sign out"):
+            st.session_state.clear()
+            st.rerun()
 
 with st.sidebar:
     st.header("Models")
@@ -153,9 +230,8 @@ def load_source():
     return pasted.strip()
 
 
-# --- run -----------------------------------------------------------------
-if go:
-    source_text = load_source()
+def run_audit(claim, source_text):
+    """One audit, start to finish, streaming each node as it lands."""
     if source_text:
         chunks = tools.index_source(source_text)
         st.info(f"Indexed your source into {chunks} chunks, the debaters can quote it.")
@@ -203,6 +279,20 @@ if go:
         status.update(label="Debate finished", state="complete")
 
     st.session_state["state"] = state
+
+
+# --- run -----------------------------------------------------------------
+if go:
+    source_text = load_source()
+
+    # Everything that can reach OpenAI happens inside the lock, with this
+    # session's key installed, and the key comes back out again afterwards.
+    with run_lock():
+        config.ACTIVE_API_KEY = st.session_state["api_key"]
+        try:
+            run_audit(claim, source_text)
+        finally:
+            config.ACTIVE_API_KEY = None
 
 # --- results -------------------------------------------------------------
 VERDICT_MEANING = {

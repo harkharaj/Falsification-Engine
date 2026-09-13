@@ -1,14 +1,19 @@
-langchain-core
-langchain-openai
-langchain-text-splitters
-langchain-chroma
-langgraph
-chromadb
-openai
-pydantic
-python-dotenv
-ddgs
-requests
-beautifulsoup4
-pypdf
-streamlit
+# Pinned to the versions this was built and evaluated against, so a Streamlit
+# Cloud rebuild cannot silently pull a breaking release.
+langchain-core==1.6.0
+langchain-openai==1.6.0
+langchain-text-splitters==1.1.2
+langchain-chroma==1.1.0
+langgraph==1.2.11
+chromadb==1.5.9
+openai==3.3.1
+pydantic==2.13.4
+python-dotenv==1.2.3
+ddgs==9.16.0
+requests==2.34.2
+beautifulsoup4==4.15.0
+pypdf==6.16.2
+streamlit==1.62.0
+
+# Deployment only: modern sqlite3 for chromadb. See the shim at the top of app.py.
+pysqlite3-binary>=0.5.0; sys_platform == "linux"

@@ -13,6 +13,10 @@ You get back a credibility report card: a verdict per sub-claim, a confidence, t
 evidence behind it, the strongest argument *against* the verdict, and what would
 change its mind.
 
+**[Try it live](https://falsification-engine.streamlit.app)** — paste your own OpenAI
+key and it runs unrestricted. (There is also a password-gated shared key for people I
+hand the password to directly.)
+
 ```
                     +-------------+
                     |  decompose  |   claim -> atomic sub-claims + falsifiers
@@ -67,8 +71,8 @@ hoped for in a prompt. The report card shows exactly what was spent.
 ## Running it
 
 ```bash
-git clone https://github.com/<you>/falsification-engine.git
-cd falsification-engine
+git clone https://github.com/harkharaj/Falsification-Engine.git
+cd Falsification-Engine
 pip install -r requirements.txt
 cp .env.example .env          # add your OPENAI_API_KEY
 
@@ -121,6 +125,24 @@ has a `leading` variant that pushes hard for the wrong answer ("Surely you agree
 handwashing does nothing?"). A sycophantic system agrees with whoever asked. This
 engine's verdict is supposed to be identical either way, and the scorecard reports the
 percentage of the time it held. Latest results: `evals/scorecard.md`.
+
+## Trying it without installing anything
+
+The hosted demo at **[falsification-engine.streamlit.app](https://falsification-engine.streamlit.app)**
+gives you two ways in:
+
+| | what it costs you | limits |
+|---|---|---|
+| **Paste your own OpenAI key** | your own credit, a few cents an audit | none — full rounds, full search budget, any model |
+| **Enter the demo password** | nothing, it runs on my key | 2 debate rounds, 8 searches, `gpt-4o-mini` |
+
+The password is not published here. If you want to try it without a key of your own,
+ask me for it.
+
+A key you paste lives in your browser session only. It is never written to disk, never
+logged, and never held in a process-wide variable another visitor's run could read —
+audits are serialised and the key is cleared the moment yours finishes. Close the tab,
+or hit **Forget my key**, and it is gone.
 
 ## Layout
 
